@@ -5,9 +5,9 @@ The app talks to Supabase over its REST API using the service-role key
 `supabase/migrations/` remain the single source of truth for the schema.
 
 Atomicity note: PostgREST does not provide multi-statement transactions across
-separate client calls. If a future flow needs several writes to commit together
-(e.g. writing an adjudication and updating usage accumulators), implement it as a
-Postgres function and call it atomically via `get_supabase().rpc(name, params)`.
+separate client calls. The claim-submission write therefore commits as a single
+transaction through the `submit_claim_atomic` Postgres function, called via
+`get_supabase().rpc(name, params)` (see `claims_repository.save_claim`).
 This module is intentionally not imported by the pure-domain unit tests.
 """
 from functools import lru_cache

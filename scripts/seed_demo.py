@@ -4,7 +4,7 @@ There is no enrollment/management API by design (out of scope), so this script
 provides the data needed to exercise POST /claims against a live database.
 Idempotent: re-running reuses existing rows.
 
-Run from the backend/ directory (requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY):
+Run from the project root (requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY):
 
     python -m scripts.seed_demo
 """

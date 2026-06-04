@@ -12,8 +12,8 @@ from decimal import Decimal
 
 from app.claims_repository import ClaimRepository, SavedClaim, SavedLine
 from app.domain.adjudication import adjudicate_line_item, claim_total_payable, roll_up_claim_status
-from app.domain.enums import LineItemDecision
-from app.domain.models import AccumulatorState, LineItemInput
+from app.domain.enums import LineItemDecision, ReasonCode
+from app.domain.models import AccumulatorState, LineItemAdjudication, LineItemInput, Reason
 from app.schemas import ClaimIn, ClaimOut, DisputeIn, DisputeOut, LineItemOut, ReasonOut
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class PolicyNotFound(Exception): ...
 class ClaimNotFound(Exception): ...
 class DisputeNotFound(Exception): ...
 class DisputeAlreadyResolved(Exception): ...
+class LineNotUnderReview(Exception): ...
 
 
 class UnknownServiceType(Exception):
@@ -75,9 +76,8 @@ def submit_claim(repo: ClaimRepository, submission: ClaimIn) -> ClaimOut:
         total_payable_amount=claim_total_payable(results),
         lines=saved_lines,
     )
-    claim_id = repo.save_claim(saved)
-    repo.save_accumulators(str(submission.policy_id), ctx.policy.benefit_period_start,
-                           ctx.policy.benefit_period_end, running_deductible_met, running_usage, ctx.service_type_ids)
+    claim_id = repo.save_claim(saved, ctx.policy.benefit_period_start, ctx.policy.benefit_period_end,
+                               running_deductible_met, running_usage, ctx.service_type_ids)
     logger.info("claim %s submitted: status=%s lines=%d", saved.claim_number, status, len(saved_lines))
     # Re-read so the response carries persisted line ids (needed to dispute a line).
     return get_claim(repo, claim_id)
@@ -94,8 +94,8 @@ def open_dispute(repo: ClaimRepository, claim_id: str, payload: DisputeIn) -> Di
     claim = repo.get_claim(claim_id)
     if claim is None:
         raise ClaimNotFound()
-    line_id = str(payload.line_item_id) if payload.line_item_id else None
-    if line_id is not None and not any(line.line_id == line_id for line in claim.lines):
+    line_id = str(payload.line_item_id)
+    if not any(line.line_id == line_id for line in claim.lines):
         raise LineNotInClaim()
     dispute = repo.create_dispute(claim_id, line_id, payload.reason)
     if dispute is None:
@@ -166,7 +166,87 @@ def resolve_dispute(repo: ClaimRepository, dispute_id: str) -> ClaimOut:
     return get_claim(repo, claim_id)
 
 
+def complete_review(repo: ClaimRepository, claim_id: str, line_id: str, decision: str, note: str | None = None) -> ClaimOut:
+    """Resolve a line item routed to manual review (under_review -> approved/denied).
+
+    A reviewer overrides the engine's `needs_review` outcome. The line's money
+    breakdown (computed at submission) stands on approval and is zeroed on denial;
+    a new adjudication version is written (triggered_by='review') so history is
+    preserved, the claim status is re-rolled-up, and the accumulator is reconciled.
+    """
+    claim = repo.get_claim(claim_id)
+    if claim is None:
+        raise ClaimNotFound()
+    line = next((l for l in claim.lines if l.line_id == line_id), None)
+    if line is None:
+        raise LineNotInClaim()
+    if line.decision != str(LineItemDecision.NEEDS_REVIEW):
+        raise LineNotUnderReview()
+
+    new_decision = LineItemDecision(decision)
+    reviewed = _reviewed_result(line, new_decision)
+
+    # Re-roll-up the claim from the other lines' current decisions + this one.
+    decisions, total = [], _ZERO
+    for other in claim.lines:
+        if other.line_id == line_id:
+            decisions.append(new_decision)
+            total += reviewed.payable_amount
+        else:
+            decisions.append(LineItemDecision(other.decision))
+            total += other.payable_amount
+    new_status = roll_up_claim_status(decisions)
+
+    # Reconcile the accumulator: a denial removes this line's prior contribution
+    # (it was counted at submission); an approval leaves it unchanged.
+    ctx = repo.load_policy_context(claim.policy_id)
+    code = line.service_type_code
+    used_amount, used_visits = ctx.usage.get(code, (_ZERO, 0))
+    new_usage = dict(ctx.usage)
+    if new_decision is LineItemDecision.DENIED:
+        deductible_met = max(_ZERO, ctx.deductible_met - line.deductible_applied)
+        new_usage[code] = (max(_ZERO, used_amount - line.payable_amount), max(0, used_visits - 1))
+    else:
+        deductible_met = ctx.deductible_met
+
+    repo.apply_review(
+        claim_id=claim_id, line_id=line_id,
+        prev_sequence=line.current_sequence, prev_line_decision=line.decision,
+        new_line=_line_from_result(line.line_number, code, ctx.service_type_ids.get(code),
+                                   line.service_date, line.billed_amount, line.quantity, line.diagnosis_code, reviewed),
+        from_claim_status=claim.status, new_claim_status=str(new_status), new_total=total, note=note,
+        policy_id=ctx.policy_id, period_start=ctx.policy.benefit_period_start, period_end=ctx.policy.benefit_period_end,
+        deductible_met=deductible_met, usage=new_usage, service_type_ids=ctx.service_type_ids,
+    )
+    logger.info("review completed: claim=%s line=%s decision=%s claim_status=%s", claim_id, line_id, new_decision, new_status)
+    return get_claim(repo, claim_id)
+
+
 # --- mapping helpers ------------------------------------------------------
+
+def _reviewed_result(line: SavedLine, decision: LineItemDecision) -> LineItemAdjudication:
+    """Build the post-review adjudication from an existing needs_review line."""
+    if decision is LineItemDecision.DENIED:
+        zero = Decimal("0.00")
+        return LineItemAdjudication(
+            decision=LineItemDecision.DENIED,
+            covered_amount=zero, deductible_applied=zero, copay_amount=zero,
+            coinsurance_amount=zero, payable_amount=zero,
+            reasons=(Reason(code=str(ReasonCode.MANUAL_REVIEW_DENIED),
+                            message="A reviewer denied the line item after manual review."),),
+        )
+    # Approved: keep the money breakdown from submission; drop the over-threshold
+    # flag and record the reviewer's approval as the explanation.
+    kept = [r for r in line.reasons if str(r.code) != str(ReasonCode.OVER_REVIEW_THRESHOLD)]
+    kept.append(Reason(code=str(ReasonCode.MANUAL_REVIEW_APPROVED),
+                       message="A reviewer approved the line item after manual review."))
+    return LineItemAdjudication(
+        decision=LineItemDecision.APPROVED,
+        covered_amount=line.covered_amount, deductible_applied=line.deductible_applied,
+        copay_amount=line.copay_amount, coinsurance_amount=line.coinsurance_amount,
+        payable_amount=line.payable_amount, reasons=tuple(kept),
+    )
+
 
 def _line_from_result(line_number, code, service_type_id, service_date, billed, quantity, diagnosis, result) -> SavedLine:
     return SavedLine(

@@ -5,6 +5,7 @@ Endpoints exercise the whole system end-to-end:
   GET  /claims/{id}                 retrieve a persisted, adjudicated claim
   POST /claims/{id}/disputes        open a dispute on a line of a claim
   POST /disputes/{id}/resolve       resolve a dispute -> re-adjudicate the line
+  POST /claims/{id}/lines/{id}/review  complete manual review of a needs_review line
 """
 from uuid import UUID
 
@@ -13,7 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from app import claims_service as svc
 from app.claims_repository import ClaimRepository, SupabaseClaimRepository
 from app.db import get_supabase
-from app.schemas import ClaimIn, ClaimOut, DisputeIn, DisputeOut
+from app.schemas import ClaimIn, ClaimOut, DisputeIn, DisputeOut, ReviewIn
 
 app = FastAPI(title="Claims Processing System", version="1.0.0")
 
@@ -66,3 +67,15 @@ def resolve_dispute(dispute_id: UUID, repo: ClaimRepository = Depends(get_reposi
         raise HTTPException(status_code=409, detail="Dispute is already resolved.")
     except svc.LineNotInClaim:
         raise HTTPException(status_code=422, detail="Dispute is not resolvable (no target line item).")
+
+
+@app.post("/claims/{claim_id}/lines/{line_id}/review", response_model=ClaimOut)
+def complete_review(claim_id: UUID, line_id: UUID, payload: ReviewIn, repo: ClaimRepository = Depends(get_repository)):
+    try:
+        return svc.complete_review(repo, str(claim_id), str(line_id), payload.decision, payload.note)
+    except svc.ClaimNotFound:
+        raise HTTPException(status_code=404, detail="Claim not found.")
+    except svc.LineNotInClaim:
+        raise HTTPException(status_code=422, detail="line_id does not belong to this claim.")
+    except svc.LineNotUnderReview:
+        raise HTTPException(status_code=409, detail="Line item is not awaiting manual review.")

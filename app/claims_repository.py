@@ -4,9 +4,10 @@
 is the live implementation over the Supabase client. Keeping the abstraction here
 lets the API be tested with an in-memory fake (no database).
 
-Atomicity note: PostgREST has no multi-call transaction, so writes happen across
-several calls. For a single-transaction guarantee, move a write path into a
-Postgres function and call it via `client.rpc(...)`.
+Atomicity note: PostgREST has no multi-call transaction. The claim-submission
+write (the largest multi-row write) is therefore done in a single transaction via
+the `submit_claim_atomic` Postgres function, called with `client.rpc(...)`. The
+smaller dispute/review write paths still use sequential calls.
 """
 from __future__ import annotations
 
@@ -67,13 +68,15 @@ class SavedClaim:
 
 class ClaimRepository(Protocol):
     def load_policy_context(self, policy_id: str) -> PolicyContextData | None: ...
-    def save_claim(self, saved: SavedClaim) -> str: ...
+    def save_claim(self, saved: SavedClaim, period_start, period_end,
+                   deductible_met: Decimal, usage: dict, service_type_ids: dict) -> str: ...
     def save_accumulators(self, policy_id: str, period_start, period_end,
                           deductible_met: Decimal, usage: dict, service_type_ids: dict) -> None: ...
     def get_claim(self, claim_id: str) -> SavedClaim | None: ...
     def create_dispute(self, claim_id: str, line_item_id: str | None, reason: str) -> dict | None: ...
     def get_dispute(self, dispute_id: str) -> dict | None: ...
     def apply_resolution(self, **kwargs) -> None: ...
+    def apply_review(self, **kwargs) -> None: ...
 
 
 # --- helpers --------------------------------------------------------------
@@ -200,33 +203,44 @@ class SupabaseClaimRepository:
         )
 
     # ---- write ----
-    def save_claim(self, saved: SavedClaim) -> str:
-        c = self.client
-        reason_ids = self._reason_code_ids()
-        claim = c.table("claim").insert({
-            "claim_number": saved.claim_number, "policy_id": saved.policy_id, "status": saved.status,
-            "provider_name": saved.provider_name, "provider_identifier": saved.provider_identifier,
-            "total_billed_amount": _num(saved.total_billed_amount),
-            "total_payable_amount": _num(saved.total_payable_amount),
-        }).execute().data[0]
-        c.table("claim_status_history").insert({
-            "claim_id": claim["id"], "from_status": None, "to_status": saved.status,
-            "reason": "submission", "changed_by": "system",
-        }).execute()
+    def save_claim(self, saved: SavedClaim, period_start, period_end,
+                   deductible_met, usage, service_type_ids) -> str:
+        """Persist the entire submission atomically via the submit_claim_atomic RPC.
 
-        for line in saved.lines:
-            li = c.table("claim_line_item").insert({
-                "claim_id": claim["id"], "line_number": line.line_number,
-                "service_type_id": line.service_type_id, "service_date": line.service_date.isoformat(),
-                "billed_amount": _num(line.billed_amount), "quantity": line.quantity,
-                "diagnosis_code": line.diagnosis_code, "status": line.decision,
-            }).execute().data[0]
-            self._insert_adjudication(li["id"], 1, line.decision, line, reason_ids)
-            c.table("line_item_status_history").insert({
-                "line_item_id": li["id"], "from_status": "pending", "to_status": line.decision,
-                "reason": "submission", "changed_by": "system",
-            }).execute()
-        return claim["id"]
+        Claim + status history + line items + adjudications + reasons +
+        accumulators are written in one transaction, so a mid-write failure can
+        no longer leave a partially-saved claim. Returns the new claim id.
+        """
+        ps = period_start.isoformat() if hasattr(period_start, "isoformat") else period_start
+        pe = period_end.isoformat() if hasattr(period_end, "isoformat") else period_end
+        payload = {
+            "claim": {
+                "claim_number": saved.claim_number, "policy_id": saved.policy_id, "status": saved.status,
+                "provider_name": saved.provider_name, "provider_identifier": saved.provider_identifier,
+                "total_billed_amount": _num(saved.total_billed_amount),
+                "total_payable_amount": _num(saved.total_payable_amount),
+            },
+            "lines": [
+                {
+                    "line_number": line.line_number, "service_type_id": line.service_type_id,
+                    "service_date": line.service_date.isoformat(), "billed_amount": _num(line.billed_amount),
+                    "quantity": line.quantity, "diagnosis_code": line.diagnosis_code, "decision": line.decision,
+                    "covered_amount": _num(line.covered_amount), "deductible_applied": _num(line.deductible_applied),
+                    "copay_amount": _num(line.copay_amount), "coinsurance_amount": _num(line.coinsurance_amount),
+                    "payable_amount": _num(line.payable_amount),
+                    "reasons": [{"code": str(r.code), "message": r.message or ""} for r in line.reasons],
+                }
+                for line in saved.lines
+            ],
+            "accumulators": {
+                "period_start": ps, "period_end": pe, "deductible_met": _num(deductible_met),
+                "usage": [
+                    {"service_type_id": service_type_ids[code], "amount_used": _num(amount), "visits_used": visits}
+                    for code, (amount, visits) in usage.items() if service_type_ids.get(code)
+                ],
+            },
+        }
+        return self.client.rpc("submit_claim_atomic", {"payload": payload}).execute().data
 
     def save_accumulators(self, policy_id, period_start, period_end, deductible_met, usage, service_type_ids):
         ps = period_start.isoformat() if hasattr(period_start, "isoformat") else period_start
@@ -278,6 +292,26 @@ class SupabaseClaimRepository:
             "status": "resolved", "resolution_outcome": outcome,
             "resolution_notes": f"Re-adjudicated: {outcome}.", "resolved_at": _now(),
         }).eq("id", dispute_id).execute()
+
+    def apply_review(self, *, claim_id, line_id, prev_sequence, prev_line_decision,
+                     new_line, from_claim_status, new_claim_status, new_total, note,
+                     policy_id, period_start, period_end, deductible_met, usage, service_type_ids):
+        c = self.client
+        reason_ids = self._reason_code_ids()
+        history_reason = f"manual review: {note}" if note else "manual review"
+        c.table("adjudication").update({"is_current": False}).eq("line_item_id", line_id).eq("is_current", True).execute()
+        self._insert_adjudication(line_id, prev_sequence + 1, new_line.decision, new_line, reason_ids, triggered_by="review")
+        c.table("claim_line_item").update({"status": new_line.decision}).eq("id", line_id).execute()
+        c.table("line_item_status_history").insert({
+            "line_item_id": line_id, "from_status": prev_line_decision, "to_status": new_line.decision,
+            "reason": history_reason, "changed_by": "reviewer",
+        }).execute()
+        c.table("claim").update({"status": new_claim_status, "total_payable_amount": _num(new_total)}).eq("id", claim_id).execute()
+        c.table("claim_status_history").insert({
+            "claim_id": claim_id, "from_status": from_claim_status, "to_status": new_claim_status,
+            "reason": history_reason, "changed_by": "reviewer",
+        }).execute()
+        self.save_accumulators(policy_id, period_start, period_end, deductible_met, usage, service_type_ids)
 
     # ---- internals ----
     def _insert_adjudication(self, line_id, sequence, decision, line, reason_ids, triggered_by="submission"):

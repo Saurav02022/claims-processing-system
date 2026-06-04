@@ -11,8 +11,8 @@ logic is a pure, dependency-free domain layer; persistence and the HTTP interfac
 sit around it.
 
 > Forward Deployed Engineer take-home. The full assignment brief lives in
-> [`backend/docs/problem_statement.md`](backend/docs/problem_statement.md) and
-> [`backend/docs/candidate_assignment_instructions.md`](backend/docs/candidate_assignment_instructions.md).
+> [`docs/problem_statement.md`](docs/problem_statement.md) and
+> [`docs/candidate_assignment_instructions.md`](docs/candidate_assignment_instructions.md).
 
 ---
 
@@ -46,19 +46,19 @@ sit around it.
 ## Project structure
 
 ```
-backend/
-  app/
-    main.py              FastAPI app + routes
-    schemas.py           API request/response models
-    claims_service.py    orchestration (submit, get, dispute, resolve)
-    claims_repository.py  Supabase persistence + repository abstraction
-    config.py / db.py    settings + Supabase client
-    domain/              pure adjudication engine (no DB/framework deps)
-      adjudication.py, models.py, enums.py
-  supabase/migrations/   SQL schema (source of truth)
-  scripts/seed_demo.py   demo plan/policy/coverage rules for a live demo
-  tests/                 engine, API, and DB-constraint tests
-  docs/                  domain model, decisions, self-review, assignment brief
+app/
+  main.py              FastAPI app + routes
+  schemas.py           API request/response models
+  claims_service.py    orchestration (submit, get, dispute, resolve, review)
+  claims_repository.py  Supabase persistence + repository abstraction
+  config.py / db.py    settings + Supabase client
+  domain/              pure adjudication engine (no DB/framework deps)
+    adjudication.py, models.py, enums.py
+supabase/migrations/   SQL schema (source of truth)
+scripts/seed_demo.py   demo plan/policy/coverage rules for a live demo
+tests/                 engine, API, and DB tests
+docs/                  domain model, decisions, self-review, assignment brief
+ai-artifacts/          raw Claude Code session logs
 ```
 
 ---
@@ -76,7 +76,7 @@ backend/
 
 ```bash
 git clone <your-repo-url> claims-processing-system
-cd claims-processing-system/backend
+cd claims-processing-system
 
 python3 -m venv venv
 source venv/bin/activate            # Windows: venv\Scripts\activate
@@ -86,7 +86,7 @@ pip install -r requirements-dev.txt # runtime deps + pytest
 cp .env.example .env                # then edit .env (see below)
 ```
 
-Fill in `backend/.env`:
+Fill in `.env`:
 
 ```
 SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
@@ -101,18 +101,20 @@ Both values are in the Supabase dashboard under **Project Settings → API**.
 ## Database setup
 
 The schema is defined by the SQL migrations in
-[`backend/supabase/migrations/`](backend/supabase/migrations) and is the single
+[`supabase/migrations/`](supabase/migrations) and is the single
 source of truth. Apply them to your Supabase project **in filename order** using
 the Supabase dashboard **SQL Editor** (paste and run each file):
 
 1. `20260604044439_baseline_schema.sql` — tables, constraints, RLS, triggers
 2. `20260604044452_seed_reference_data.sql` — service-type catalog + reason codes
 3. `20260604044802_schema_hardening.sql` — advisor fixes (indexes, search_path)
+4. `20260604120000_review_completion.sql` — manual-review trigger + reason codes
+5. `20260604130000_atomic_claim_submission.sql` — `submit_claim_atomic()` RPC
 
 Then load a demo plan, coverage rules, member, and policy to submit claims against:
 
 ```bash
-# from backend/, with the venv active and .env filled in
+# from the project root, with the venv active and .env filled in
 python -m scripts.seed_demo
 ```
 
@@ -126,7 +128,7 @@ MENTAL_HEALTH (not covered).
 ## Run
 
 ```bash
-# from backend/, venv active
+# from the project root, venv active
 uvicorn app.main:app --reload
 ```
 
@@ -145,6 +147,7 @@ uvicorn app.main:app --reload
 | `GET`  | `/claims/{claim_id}` | Fetch a persisted, adjudicated claim |
 | `POST` | `/claims/{claim_id}/disputes` | Open a dispute on a line of a claim |
 | `POST` | `/disputes/{dispute_id}/resolve` | Resolve a dispute (re-adjudicates the line) |
+| `POST` | `/claims/{claim_id}/lines/{line_id}/review` | Complete manual review of a `needs_review` line (`approved`/`denied`) |
 
 ### Example: submit a claim
 
@@ -170,12 +173,27 @@ This returns one approved line (deductible + copay), one approved line
 carries its money breakdown and reason codes. Copy the returned `claim_id` and
 `GET /claims/{claim_id}` to read it back, or a line's `id` to open a dispute.
 
+### Example: complete a manual review
+
+The `OPTICAL` line above is `needs_review`. A reviewer resolves it (taking the
+claim out of `under_review`):
+
+```bash
+curl -X POST http://127.0.0.1:8000/claims/<CLAIM_ID>/lines/<LINE_ID>/review \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "approved"}'
+```
+
+`approved` keeps the line's computed payable and re-rolls the claim up;
+`denied` zeroes the line's payable. Either way a new adjudication version is
+recorded (`triggered_by = review`) with a status-history entry.
+
 ---
 
 ## Tests
 
 ```bash
-# from backend/, venv active
+# from the project root, venv active
 pytest -q
 ```
 
@@ -190,6 +208,11 @@ What runs:
   env vars are set; otherwise it is skipped. It verifies CHECK constraints, the
   one-current-adjudication index, accumulator uniqueness, and FK cascade against
   the live database (each test rolls back / cleans up after itself).
+- **Repository integration** — `tests/test_repository_integration.py` (also gated
+  on Supabase env vars) drives the real `SupabaseClaimRepository` end-to-end:
+  submit → read-back, accumulator persistence across claims, dispute open/resolve
+  (overturn + versioning), and manual-review approve/deny. Each test seeds and
+  deletes its own isolated policy graph.
 
 The engine and API tests need no database or running server.
 
@@ -197,12 +220,12 @@ The engine and API tests need no database or running server.
 
 ## Design & documentation
 
-- [`backend/docs/domain-model.md`](backend/docs/domain-model.md) — entities,
+- [`docs/domain-model.md`](docs/domain-model.md) — entities,
   relationships, ERD, coverage-rule modeling, and the claim / line-item state
   machines.
-- [`backend/docs/decisions.md`](backend/docs/decisions.md) — key decisions,
+- [`docs/decisions.md`](docs/decisions.md) — key decisions,
   trade-offs, and assumptions.
-- [`backend/docs/self-review.md`](backend/docs/self-review.md) — honest
+- [`docs/self-review.md`](docs/self-review.md) — honest
   assessment of what is solid and what is rough.
 
 ---
@@ -211,11 +234,12 @@ The engine and API tests need no database or running server.
 
 These are deliberate and documented in `decisions.md` / `self-review.md`:
 
-- **Writes are not atomic.** PostgREST has no multi-statement transaction, so a
-  claim's rows are written across several calls. A Postgres function (RPC) would
-  make this transactional if needed.
-- **Dispute resolution is line-level.** You dispute a specific line; claim-wide
-  disputes can be opened but are not resolved by the resolve endpoint.
+- **Claim submission is atomic.** The full submission write runs in one
+  transaction via the `submit_claim_atomic` Postgres function (`client.rpc(...)`),
+  so a mid-write failure rolls back cleanly. The smaller dispute-resolution and
+  manual-review write paths are still sequential over PostgREST.
+- **Dispute resolution is line-level.** You dispute a specific line
+  (`line_item_id` is required); a single claim-wide dispute action is not offered.
 - **Aggregate overflow.** Per-line `billed_amount` is bounded to the
   `NUMERIC(12,2)` range; a claim whose *total* exceeds it is an untested edge.
 - **No authentication / authorization.** The service uses the Supabase

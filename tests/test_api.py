@@ -45,11 +45,14 @@ class FakeRepo:
     def load_policy_context(self, policy_id):
         return self.context if str(policy_id) == POLICY_ID else None
 
-    def save_claim(self, saved):
+    def save_claim(self, saved, period_start, period_end, deductible_met, usage, service_type_ids):
+        # Mirrors the atomic submit_claim_atomic RPC: persists the claim and
+        # writes accumulators in one call.
         claim_id = str(uuid.uuid4())
         for line in saved.lines:
             line.line_id, line.current_sequence = str(uuid.uuid4()), 1
         self._claims[claim_id] = saved
+        self.saved_accumulators = {"deductible_met": deductible_met, "usage": dict(usage)}
         return claim_id
 
     def save_accumulators(self, policy_id, ps, pe, deductible_met, usage, service_type_ids):
@@ -84,6 +87,19 @@ class FakeRepo:
         self._disputes[str(dispute_id)].update(status="resolved", resolution_outcome=outcome)
         self.saved_accumulators = {"deductible_met": deductible_met, "usage": dict(usage)}
 
+    def apply_review(self, *, claim_id, line_id, prev_sequence, new_line,
+                     new_claim_status, new_total, deductible_met, usage, **_):
+        claim = self._claims[str(claim_id)]
+        for line in claim.lines:
+            if line.line_id == line_id:
+                line.decision, line.reasons = new_line.decision, new_line.reasons
+                line.covered_amount, line.payable_amount = new_line.covered_amount, new_line.payable_amount
+                line.deductible_applied = new_line.deductible_applied
+                line.copay_amount, line.coinsurance_amount = new_line.copay_amount, new_line.coinsurance_amount
+                line.current_sequence = prev_sequence + 1
+        claim.status, claim.total_payable_amount = new_claim_status, new_total
+        self.saved_accumulators = {"deductible_met": deductible_met, "usage": dict(usage)}
+
 
 @pytest.fixture
 def make_client():
@@ -97,6 +113,36 @@ def make_client():
 
 def _submit(client, lines):
     return client.post("/claims", json={"policy_id": POLICY_ID, "line_items": lines})
+
+
+def test_money_fields_serialize_with_two_decimals():
+    # Decimals with <2 dp scale (as the DB round-trip can yield) must still
+    # serialize as fixed 2-decimal strings across every monetary field.
+    import json
+
+    from app.schemas import ClaimOut, LineItemOut
+
+    line = LineItemOut(
+        id=uuid.uuid4(), line_number=1, service_type_code="PHYSIO",
+        billed_amount=Decimal("300.0"), decision="approved",
+        covered_amount=Decimal("300.0"), deductible_applied=Decimal("200"),
+        copay_amount=Decimal("20.0"), coinsurance_amount=Decimal("0"),
+        payable_amount=Decimal("80.0"), reasons=[],
+    )
+    claim = ClaimOut(
+        claim_id=uuid.uuid4(), claim_number="CLM-X", status="approved",
+        total_billed_amount=Decimal("300.0"), total_payable_amount=Decimal("80.0"),
+        line_items=[line],
+    )
+    dumped = json.loads(claim.model_dump_json())
+    assert dumped["total_billed_amount"] == "300.00"
+    assert dumped["total_payable_amount"] == "80.00"
+    li = dumped["line_items"][0]
+    assert li["billed_amount"] == "300.00"
+    assert li["deductible_applied"] == "200.00"
+    assert li["copay_amount"] == "20.00"
+    assert li["coinsurance_amount"] == "0.00"
+    assert li["payable_amount"] == "80.00"
 
 
 def test_fully_covered_claim_is_approved(make_client):
@@ -187,6 +233,15 @@ def test_open_dispute_marks_claim_disputed(make_client):
     assert client.get(f"/claims/{claim['claim_id']}").json()["status"] == "disputed"
 
 
+def test_open_dispute_without_line_item_is_422(make_client):
+    # Claim-level disputes are rejected at open time so a claim can never get
+    # stuck permanently in `disputed` with no resolvable target.
+    client, _ = make_client()
+    claim = _submit_optical_denied(client)
+    resp = client.post(f"/claims/{claim['claim_id']}/disputes", json={"reason": "Whole claim is wrong"})
+    assert resp.status_code == 422
+
+
 def test_open_dispute_on_foreign_line_is_422(make_client):
     client, _ = make_client()
     claim = _submit_optical_denied(client)
@@ -226,3 +281,107 @@ def test_resolve_already_resolved_is_409(make_client):
 def test_resolve_unknown_dispute_is_404(make_client):
     client, _ = make_client()
     assert client.post(f"/disputes/{uuid.uuid4()}/resolve").status_code == 404
+
+
+# --- manual review completion --------------------------------------------
+
+def _review_context(usage=None):
+    """A context where OPTICAL routes to manual review above $500 billed."""
+    ctx = make_context(rules={
+        "OPTICAL": CoverageRule(service_type_code="OPTICAL", review_threshold_amount=_dec(500)),
+        "PHYSIO": CoverageRule(service_type_code="PHYSIO"),  # fully covered, for mixed claims
+    })
+    if usage is not None:
+        ctx.usage = usage
+    return ctx
+
+
+def _submit_optical_review(client, billed=600):
+    return _submit(client, [{"service_type_code": "OPTICAL", "service_date": "2026-03-01", "billed_amount": billed}]).json()
+
+
+def test_over_threshold_line_routes_to_under_review(make_client):
+    client, _ = make_client(_review_context())
+    claim = _submit_optical_review(client)
+    assert claim["status"] == "under_review"
+    line = claim["line_items"][0]
+    assert line["decision"] == "needs_review"
+    assert "OVER_REVIEW_THRESHOLD" in [r["code"] for r in line["reasons"]]
+
+
+def test_complete_review_approve_moves_claim_to_approved(make_client):
+    client, _ = make_client(_review_context())
+    claim = _submit_optical_review(client)
+    line_id = claim["line_items"][0]["id"]
+    resp = client.post(f"/claims/{claim['claim_id']}/lines/{line_id}/review", json={"decision": "approved"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "approved"
+    line = body["line_items"][0]
+    assert line["decision"] == "approved"
+    assert _dec(line["payable_amount"]) == _dec(600)  # money breakdown preserved
+    codes = [r["code"] for r in line["reasons"]]
+    assert "MANUAL_REVIEW_APPROVED" in codes and "OVER_REVIEW_THRESHOLD" not in codes
+
+
+def test_complete_review_deny_moves_claim_to_denied_and_zeros_payable(make_client):
+    client, _ = make_client(_review_context())
+    claim = _submit_optical_review(client)
+    line_id = claim["line_items"][0]["id"]
+    body = client.post(f"/claims/{claim['claim_id']}/lines/{line_id}/review", json={"decision": "denied"}).json()
+    assert body["status"] == "denied"
+    line = body["line_items"][0]
+    assert line["decision"] == "denied"
+    assert _dec(line["payable_amount"]) == _dec(0)
+    assert _dec(body["total_payable_amount"]) == _dec(0)
+    assert "MANUAL_REVIEW_DENIED" in [r["code"] for r in line["reasons"]]
+
+
+def test_review_deny_reconciles_accumulator(make_client):
+    # Context already reflects the submitted line's usage; denial must remove it.
+    client, repo = make_client(_review_context(usage={"OPTICAL": (_dec(600), 1)}))
+    claim = _submit_optical_review(client)
+    line_id = claim["line_items"][0]["id"]
+    client.post(f"/claims/{claim['claim_id']}/lines/{line_id}/review", json={"decision": "denied"})
+    assert repo.saved_accumulators["usage"]["OPTICAL"] == (_dec(0), 0)
+
+
+def test_review_approve_on_mixed_claim_rolls_up_correctly(make_client):
+    client, _ = make_client(_review_context())
+    claim = _submit(client, [
+        {"service_type_code": "PHYSIO", "service_date": "2026-03-01", "billed_amount": 100},
+        {"service_type_code": "OPTICAL", "service_date": "2026-03-02", "billed_amount": 600},
+    ]).json()
+    assert claim["status"] == "under_review"
+    optical = next(li for li in claim["line_items"] if li["service_type_code"] == "OPTICAL")
+    body = client.post(f"/claims/{claim['claim_id']}/lines/{optical['id']}/review", json={"decision": "denied"}).json()
+    assert body["status"] == "partially_approved"  # PHYSIO approved + OPTICAL denied
+
+
+def test_review_on_non_review_line_is_409(make_client):
+    client, _ = make_client(_review_context())
+    claim = _submit(client, [{"service_type_code": "PHYSIO", "service_date": "2026-03-01", "billed_amount": 100}]).json()
+    line_id = claim["line_items"][0]["id"]
+    resp = client.post(f"/claims/{claim['claim_id']}/lines/{line_id}/review", json={"decision": "approved"})
+    assert resp.status_code == 409
+
+
+def test_review_on_foreign_line_is_422(make_client):
+    client, _ = make_client(_review_context())
+    claim = _submit_optical_review(client)
+    resp = client.post(f"/claims/{claim['claim_id']}/lines/{uuid.uuid4()}/review", json={"decision": "approved"})
+    assert resp.status_code == 422
+
+
+def test_review_on_unknown_claim_is_404(make_client):
+    client, _ = make_client(_review_context())
+    resp = client.post(f"/claims/{uuid.uuid4()}/lines/{uuid.uuid4()}/review", json={"decision": "approved"})
+    assert resp.status_code == 404
+
+
+def test_review_invalid_decision_is_422(make_client):
+    client, _ = make_client(_review_context())
+    claim = _submit_optical_review(client)
+    line_id = claim["line_items"][0]["id"]
+    resp = client.post(f"/claims/{claim['claim_id']}/lines/{line_id}/review", json={"decision": "paid"})
+    assert resp.status_code == 422

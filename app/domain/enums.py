@@ -1,7 +1,7 @@
 """Domain enumerations.
 
 Values mirror the CHECK constraints and seeded reason codes in the database
-migrations (see backend/supabase/migrations/), so the domain layer and the
+migrations (see supabase/migrations/), so the domain layer and the
 schema stay in lock-step.
 """
 from enum import StrEnum
@@ -36,6 +36,7 @@ class ReasonCode(StrEnum):
     SERVICE_DATE_OUT_OF_COVERAGE = "SERVICE_DATE_OUT_OF_COVERAGE"
     ANNUAL_LIMIT_EXCEEDED = "ANNUAL_LIMIT_EXCEEDED"
     VISIT_LIMIT_EXCEEDED = "VISIT_LIMIT_EXCEEDED"
+    MANUAL_REVIEW_DENIED = "MANUAL_REVIEW_DENIED"
     # review
     OVER_REVIEW_THRESHOLD = "OVER_REVIEW_THRESHOLD"
     # adjustments
@@ -44,3 +45,4 @@ class ReasonCode(StrEnum):
     COINSURANCE_APPLIED = "COINSURANCE_APPLIED"
     LIMIT_PARTIALLY_APPLIED = "LIMIT_PARTIALLY_APPLIED"
     COVERED_IN_FULL = "COVERED_IN_FULL"
+    MANUAL_REVIEW_APPROVED = "MANUAL_REVIEW_APPROVED"
