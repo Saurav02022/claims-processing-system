@@ -1,0 +1,7 @@
+# Local tooling / machine config (not part of the deliverable)
+.mcp.json
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
