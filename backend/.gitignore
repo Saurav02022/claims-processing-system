@@ -1,0 +1,39 @@
+# Python virtual environment
+venv/
+.env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# FastAPI / server logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/editor files
+.vscode/
+.idea/
+
+# Test/cache folders
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+
+# Build files
+build/
+dist/
+*.egg-info/
