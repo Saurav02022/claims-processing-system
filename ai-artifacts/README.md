@@ -21,7 +21,8 @@ message timestamps inside each log.
 | `..._interrupted-stub_cc1f7c2b.jsonl` | 9 | Jun 3 | Interrupted session (no assistant turns) |
 | `..._framing-domain-schema_d8b81f67.jsonl` | 1161 | Jun 4 03:51–08:09 | Supabase setup, schema + migrations, domain modeling, persistence, human steering (AskUserQuestion) |
 | `..._review-fixes_4b5d4ed4.jsonl` | 786 | Jun 4 | Reviewer report + lifecycle/dispute fixes (forked/resumed twin of the session below) |
-| `..._review-qa-atomicrpc-docs_48cc9682.jsonl` | 950 | Jun 4 15:21–onward | Strict review → corrections (manual review, line-level disputes, 2-dp money) → QA regression → atomic-submission RPC → recreated docs → repo flatten → README. The most recent / live session. |
+| `..._review-qa-atomicrpc-docs_48cc9682.jsonl` | 991 | Jun 4 15:21–onward | Strict review → corrections (manual review, line-level disputes, 2-dp money) → QA regression → atomic-submission RPC → recreated docs → repo flatten → README. |
+| `..._review-phi-test_c047b8e3.jsonl` | 197 | Jun 4 16:31–17:35 | Strict assignment-reviewer pass over the whole submission, then the one fix it surfaced: added a PHI non-leakage API test so the README's tested-behavior claim is actually backed by a test. The most recent / live session. |
 | `..._reviewer-pass_2df7ba2c.jsonl` | 143 | Jun 4 | Read-only assignment-reviewer evaluation |
 | `..._reviewer-pass_dea90f33.jsonl` | 169 | Jun 4 | Read-only assignment-reviewer evaluation |
 | `..._interrupted-stub_68b69334.jsonl` | 15 | Jun 4 | Interrupted session (no assistant turns) |
@@ -35,11 +36,11 @@ message timestamps inside each log.
 - **Coding (engine, API, persistence)** — `1549d6e8`, `d8b81f67`, `f8c046b0`, `48cc9682`/`4b5d4ed4`.
 - **Testing** — `1549d6e8` (test-first), `48cc9682` (integration tests).
 - **Documentation** — `f8c046b0`, `48cc9682`, `1549d6e8`.
-- **QA / review** — `2df7ba2c`, `dea90f33`, `4b5d4ed4`, `48cc9682`.
+- **QA / review** — `2df7ba2c`, `dea90f33`, `4b5d4ed4`, `48cc9682`, `c047b8e3`.
 
 ## Honest notes
 
 - The three `interrupted-stub` logs have 3 user messages and **0 assistant turns** — they are abandoned/restarted sessions, included only for completeness.
 - `4b5d4ed4` and `48cc9682` overlap (the session was forked/resumed); both are kept rather than dropping one.
 - **Domain *research* is the thinnest-evidenced phase** — the domain was reasoned about heavily inside the modeling sessions, but there is little external-source research captured in the logs.
-- `48cc9682` is the live session at submission time, so the final commit/push moments may post-date the captured copy.
+- `c047b8e3` is the live session at submission time, so the final commit/push moments may post-date the captured copy.

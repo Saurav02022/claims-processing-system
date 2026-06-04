@@ -217,6 +217,40 @@ def test_get_missing_claim_returns_404(make_client):
     assert client.get(f"/claims/{uuid.uuid4()}").status_code == 404
 
 
+def test_phi_is_never_echoed_in_responses(make_client):
+    # Sensitive health data (provider name/identifier, diagnosis code) is accepted
+    # on submission and persisted, but must never appear in any API response — the
+    # ClaimOut / LineItemOut shapes deliberately exclude it. Use distinctive
+    # sentinels so a leak anywhere in the JSON body is caught.
+    client, repo = make_client()
+    phi = {
+        "provider_name": "PHI-PROVIDER-NAME-SENTINEL",
+        "provider_identifier": "PHI-PROVIDER-ID-SENTINEL",
+        "diagnosis_code": "PHI-DIAGNOSIS-SENTINEL",
+    }
+    created = client.post("/claims", json={
+        "policy_id": POLICY_ID,
+        "provider_name": phi["provider_name"],
+        "provider_identifier": phi["provider_identifier"],
+        "line_items": [{
+            "service_type_code": "PHYSIO", "service_date": "2026-03-01",
+            "billed_amount": 100, "diagnosis_code": phi["diagnosis_code"],
+        }],
+    })
+    assert created.status_code == 201
+    fetched = client.get(f"/claims/{created.json()['claim_id']}")
+    assert fetched.status_code == 200
+
+    # The PHI was actually persisted (so this isn't passing because it was dropped
+    # on the way in), then confirm none of it surfaces in either response body.
+    saved = repo.get_claim(created.json()["claim_id"])
+    assert saved.provider_name == phi["provider_name"]
+    assert saved.lines[0].diagnosis_code == phi["diagnosis_code"]
+    for sentinel in phi.values():
+        assert sentinel not in created.text
+        assert sentinel not in fetched.text
+
+
 # --- disputes -------------------------------------------------------------
 
 def _submit_optical_denied(client):
