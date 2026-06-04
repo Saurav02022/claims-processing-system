@@ -15,16 +15,6 @@ class LineItemDecision(StrEnum):
     NEEDS_REVIEW = "needs_review"
 
 
-class LineItemStatus(StrEnum):
-    """Lifecycle state of a line item (claim_line_item.status)."""
-
-    PENDING = "pending"
-    APPROVED = "approved"
-    DENIED = "denied"
-    NEEDS_REVIEW = "needs_review"
-    PAID = "paid"
-
-
 class ClaimStatus(StrEnum):
     """Lifecycle state of a claim (claim.status); a roll-up of its line items."""
 
@@ -35,13 +25,6 @@ class ClaimStatus(StrEnum):
     DENIED = "denied"
     PAID = "paid"
     DISPUTED = "disputed"
-
-
-class TriggeredBy(StrEnum):
-    """What caused an adjudication pass (adjudication.triggered_by)."""
-
-    SUBMISSION = "submission"
-    DISPUTE = "dispute"
 
 
 class ReasonCode(StrEnum):
