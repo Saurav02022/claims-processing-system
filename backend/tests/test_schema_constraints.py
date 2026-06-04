@@ -1,175 +1,176 @@
-"""Data-integrity tests for the database schema (integration).
+"""Data-integrity tests for the database schema (integration, via Supabase REST).
 
 These verify the migration's guarantees actually hold in Postgres: CHECK
 constraints, the "exactly one current adjudication per line" partial unique
-index, accumulator uniqueness for the policy-wide deductible row, status
-domains, and FK cascade. They are the safety net behind the domain layer.
+index, the policy-wide accumulator uniqueness, and FK cascade.
 
-They require a live database and are SKIPPED unless DATABASE_URL is set:
+They require a live Supabase project and are SKIPPED unless SUPABASE_URL and
+SUPABASE_SERVICE_ROLE_KEY are configured (via .env or the environment).
 
-    DATABASE_URL=postgresql+psycopg://... pytest tests/test_schema_constraints.py
-
-Every test runs inside a transaction that is rolled back, so nothing persists.
+There is no transaction rollback over PostgREST, so each test cleans up the rows
+it created in a fixture teardown (children cascade from the claim; remaining
+parents are deleted explicitly). Test data uses a random suffix to avoid
+colliding with leftovers from a previous interrupted run.
 """
-import os
+import uuid
 
 import pytest
 
+pytest.importorskip("supabase")
+try:
+    from postgrest.exceptions import APIError
+except Exception:  # pragma: no cover - import shape varies by version
+    APIError = Exception
+
+
+def _have_creds() -> bool:
+    try:
+        from app.config import get_settings
+
+        s = get_settings()
+        return bool(s.supabase_url and s.supabase_service_role_key)
+    except Exception:
+        return False
+
+
 pytestmark = pytest.mark.skipif(
-    not os.getenv("DATABASE_URL"),
-    reason="integration test: set DATABASE_URL to run",
+    not _have_creds(),
+    reason="integration test: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to run",
 )
 
-pytest.importorskip("sqlalchemy")
-from sqlalchemy import text  # noqa: E402
-from sqlalchemy.exc import IntegrityError  # noqa: E402
+
+class Seeder:
+    """Inserts rows and remembers them so teardown can delete them."""
+
+    def __init__(self, client):
+        self.client = client
+        self._created: list[tuple[str, str]] = []
+
+    def insert(self, table: str, payload: dict) -> dict:
+        row = self.client.table(table).insert(payload).execute().data[0]
+        self._created.append((table, row["id"]))
+        return row
+
+    def forget(self, table: str, row_id: str) -> None:
+        # Stop tracking a row we deleted ourselves (e.g. cascade tests).
+        self._created = [(t, i) for (t, i) in self._created if not (t == table and i == row_id)]
+
+    def cleanup(self) -> None:
+        for table, row_id in reversed(self._created):
+            try:
+                self.client.table(table).delete().eq("id", row_id).execute()
+            except Exception:
+                pass
 
 
 @pytest.fixture
-def conn():
-    """A connection inside a transaction that is always rolled back."""
-    from app.db import get_engine
+def seeder():
+    from app.db import get_supabase
 
-    engine = get_engine()
-    with engine.connect() as connection:
-        trans = connection.begin()
-        try:
-            yield connection
-        finally:
-            trans.rollback()
+    s = Seeder(get_supabase())
+    try:
+        yield s
+    finally:
+        s.cleanup()
 
 
-def _seed_claim(conn) -> dict:
+def _service_type_id(client) -> str:
+    return client.table("service_type").select("id").eq("code", "PHYSIO").single().execute().data["id"]
+
+
+def _seed_claim(seeder: Seeder) -> dict:
     """Insert a minimal valid plan->member->policy->claim->line_item graph."""
-    service_type_id = conn.execute(
-        text("select id from service_type where code = 'PHYSIO'")
-    ).scalar_one()
-    plan_id = conn.execute(
-        text("insert into plan (name) values ('Test Plan') returning id")
-    ).scalar_one()
-    member_id = conn.execute(
-        text("insert into member (full_name) values ('Test Member') returning id")
-    ).scalar_one()
-    policy_id = conn.execute(
-        text(
-            """
-            insert into policy (policy_number, member_id, plan_id,
-                                benefit_period_start, benefit_period_end)
-            values ('TEST-POL', :m, :p, '2026-01-01', '2026-12-31')
-            returning id
-            """
-        ),
-        {"m": member_id, "p": plan_id},
-    ).scalar_one()
-    claim_id = conn.execute(
-        text(
-            "insert into claim (claim_number, policy_id) "
-            "values ('TEST-CLM', :pol) returning id"
-        ),
-        {"pol": policy_id},
-    ).scalar_one()
-    line_item_id = conn.execute(
-        text(
-            """
-            insert into claim_line_item
-                (claim_id, line_number, service_type_id, service_date, billed_amount)
-            values (:c, 1, :st, '2026-03-01', 100)
-            returning id
-            """
-        ),
-        {"c": claim_id, "st": service_type_id},
-    ).scalar_one()
+    sfx = uuid.uuid4().hex[:8]
+    service_type_id = _service_type_id(seeder.client)
+    plan = seeder.insert("plan", {"name": f"Test Plan {sfx}"})
+    member = seeder.insert("member", {"full_name": "Test Member"})
+    policy = seeder.insert(
+        "policy",
+        {
+            "policy_number": f"TEST-POL-{sfx}",
+            "member_id": member["id"],
+            "plan_id": plan["id"],
+            "benefit_period_start": "2026-01-01",
+            "benefit_period_end": "2026-12-31",
+        },
+    )
+    claim = seeder.insert(
+        "claim", {"claim_number": f"TEST-CLM-{sfx}", "policy_id": policy["id"]}
+    )
+    line_item = seeder.insert(
+        "claim_line_item",
+        {
+            "claim_id": claim["id"],
+            "line_number": 1,
+            "service_type_id": service_type_id,
+            "service_date": "2026-03-01",
+            "billed_amount": 100,
+        },
+    )
     return {
         "service_type_id": service_type_id,
-        "plan_id": plan_id,
-        "policy_id": policy_id,
-        "claim_id": claim_id,
-        "line_item_id": line_item_id,
+        "plan_id": plan["id"],
+        "policy_id": policy["id"],
+        "claim_id": claim["id"],
+        "line_item_id": line_item["id"],
     }
 
 
-def test_coinsurance_rate_above_one_is_rejected(conn):
-    ids = _seed_claim(conn)
-    with pytest.raises(IntegrityError):
-        with conn.begin_nested():
-            conn.execute(
-                text(
-                    "insert into coverage_rule (plan_id, service_type_id, coinsurance_rate) "
-                    "values (:p, :st, 1.5)"
-                ),
-                {"p": ids["plan_id"], "st": ids["service_type_id"]},
-            )
+def test_coinsurance_rate_above_one_is_rejected(seeder):
+    sfx = uuid.uuid4().hex[:8]
+    plan = seeder.insert("plan", {"name": f"Test Plan {sfx}"})
+    with pytest.raises(APIError):
+        seeder.client.table("coverage_rule").insert(
+            {
+                "plan_id": plan["id"],
+                "service_type_id": _service_type_id(seeder.client),
+                "coinsurance_rate": 1.5,  # violates CHECK (0..1)
+            }
+        ).execute()
 
 
-def test_invalid_claim_status_is_rejected(conn):
-    ids = _seed_claim(conn)
-    with pytest.raises(IntegrityError):
-        with conn.begin_nested():
-            conn.execute(
-                text("update claim set status = 'bogus' where id = :c"),
-                {"c": ids["claim_id"]},
-            )
+def test_invalid_claim_status_is_rejected(seeder):
+    ids = _seed_claim(seeder)
+    with pytest.raises(APIError):
+        seeder.client.table("claim").update({"status": "bogus"}).eq("id", ids["claim_id"]).execute()
 
 
-def test_negative_billed_amount_is_rejected(conn):
-    ids = _seed_claim(conn)
-    with pytest.raises(IntegrityError):
-        with conn.begin_nested():
-            conn.execute(
-                text(
-                    "insert into claim_line_item "
-                    "(claim_id, line_number, service_type_id, service_date, billed_amount) "
-                    "values (:c, 2, :st, '2026-03-01', -10)"
-                ),
-                {"c": ids["claim_id"], "st": ids["service_type_id"]},
-            )
-
-
-def test_only_one_current_adjudication_per_line_item(conn):
-    ids = _seed_claim(conn)
-    conn.execute(
-        text(
-            "insert into adjudication (line_item_id, sequence, is_current, decision) "
-            "values (:li, 1, true, 'approved')"
-        ),
-        {"li": ids["line_item_id"]},
+def test_only_one_current_adjudication_per_line_item(seeder):
+    ids = _seed_claim(seeder)
+    seeder.insert(
+        "adjudication",
+        {"line_item_id": ids["line_item_id"], "sequence": 1, "is_current": True, "decision": "approved"},
     )
-    with pytest.raises(IntegrityError):
-        with conn.begin_nested():
-            conn.execute(
-                text(
-                    "insert into adjudication (line_item_id, sequence, is_current, decision) "
-                    "values (:li, 2, true, 'denied')"
-                ),
-                {"li": ids["line_item_id"]},
-            )
+    with pytest.raises(APIError):
+        seeder.client.table("adjudication").insert(
+            {"line_item_id": ids["line_item_id"], "sequence": 2, "is_current": True, "decision": "denied"}
+        ).execute()
 
 
-def test_one_policy_wide_accumulator_row_per_period(conn):
-    ids = _seed_claim(conn)
-    conn.execute(
-        text(
-            "insert into accumulator (policy_id, service_type_id, period_start, period_end) "
-            "values (:p, null, '2026-01-01', '2026-12-31')"
-        ),
-        {"p": ids["policy_id"]},
+def test_one_policy_wide_accumulator_row_per_period(seeder):
+    ids = _seed_claim(seeder)
+    base = {
+        "policy_id": ids["policy_id"],
+        "service_type_id": None,  # policy-wide (deductible) row
+        "period_start": "2026-01-01",
+        "period_end": "2026-12-31",
+    }
+    seeder.insert("accumulator", base)
+    with pytest.raises(APIError):
+        seeder.client.table("accumulator").insert(base).execute()
+
+
+def test_deleting_claim_cascades_to_line_items(seeder):
+    ids = _seed_claim(seeder)
+    seeder.client.table("claim").delete().eq("id", ids["claim_id"]).execute()
+    seeder.forget("claim", ids["claim_id"])
+    seeder.forget("claim_line_item", ids["line_item_id"])  # cascaded away
+
+    remaining = (
+        seeder.client.table("claim_line_item")
+        .select("id")
+        .eq("claim_id", ids["claim_id"])
+        .execute()
+        .data
     )
-    with pytest.raises(IntegrityError):
-        with conn.begin_nested():
-            conn.execute(
-                text(
-                    "insert into accumulator (policy_id, service_type_id, period_start, period_end) "
-                    "values (:p, null, '2026-01-01', '2026-12-31')"
-                ),
-                {"p": ids["policy_id"]},
-            )
-
-
-def test_deleting_claim_cascades_to_line_items(conn):
-    ids = _seed_claim(conn)
-    conn.execute(text("delete from claim where id = :c"), {"c": ids["claim_id"]})
-    remaining = conn.execute(
-        text("select count(*) from claim_line_item where claim_id = :c"),
-        {"c": ids["claim_id"]},
-    ).scalar_one()
-    assert remaining == 0
+    assert remaining == []

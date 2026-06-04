@@ -15,17 +15,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Direct Postgres connection (Supabase connection string / pooler).
-    # Used by the adjudication + persistence layer because adjudication writes
-    # the decision and updates usage accumulators in a single transaction.
-    # Format: postgresql+psycopg://USER:PASSWORD@HOST:PORT/postgres
-    database_url: str
-
-    # Supabase REST endpoint + service-role key. Optional here; reserved for
-    # any REST-based access. The service role is server-side only (no end-user
-    # auth in scope) and must never be exposed to a client.
-    supabase_url: str | None = None
-    supabase_service_role_key: str | None = None
+    # Supabase REST endpoint and service-role key. The service role is
+    # server-side only (no end-user auth in scope), bypasses RLS, and must never
+    # be exposed to a client. These are the only credentials the app needs.
+    supabase_url: str
+    supabase_service_role_key: str
 
 
 @lru_cache

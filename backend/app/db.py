@@ -1,37 +1,24 @@
-"""Database access layer.
+"""Database access via the Supabase client (PostgREST).
 
-A thin wrapper over a SQLAlchemy Engine (psycopg v3 driver). We deliberately do
-not use the ORM: raw SQL migrations under `supabase/migrations/` remain the
-single source of truth for the schema, avoiding ORM/migration drift.
+The app talks to Supabase over its REST API using the service-role key
+(server-side only; it bypasses RLS). Raw SQL migrations under
+`supabase/migrations/` remain the single source of truth for the schema.
 
-The engine and `transaction()` helper exist so the adjudication engine can later
-write a decision and update usage accumulators atomically in one transaction.
+Atomicity note: PostgREST does not provide multi-statement transactions across
+separate client calls. If a future flow needs several writes to commit together
+(e.g. writing an adjudication and updating usage accumulators), implement it as a
+Postgres function and call it atomically via `get_supabase().rpc(name, params)`.
 This module is intentionally not imported by the pure-domain unit tests.
 """
-from collections.abc import Iterator
-from contextlib import contextmanager
 from functools import lru_cache
 
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Connection, Engine
+from supabase import Client, create_client
 
 from app.config import get_settings
 
 
 @lru_cache
-def get_engine() -> Engine:
-    """Create (once) and return the SQLAlchemy engine."""
+def get_supabase() -> Client:
+    """Create (once) and return the Supabase client."""
     settings = get_settings()
-    return create_engine(settings.database_url, pool_pre_ping=True, future=True)
-
-
-@contextmanager
-def transaction() -> Iterator[Connection]:
-    """Yield a connection inside a transaction.
-
-    Commits on success, rolls back on exception. This is the unit of atomicity
-    for adjudication: decision rows and accumulator updates commit together.
-    """
-    engine = get_engine()
-    with engine.begin() as conn:
-        yield conn
+    return create_client(settings.supabase_url, settings.supabase_service_role_key)

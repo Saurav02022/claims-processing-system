@@ -24,8 +24,8 @@
    the original decision for audit.
 5. **Explanations are first-class.** `adjudication_reason` rows (reason code + human message +
    structured JSONB detail) answer "why" for every decision; `reason_code` is a queryable taxonomy.
-6. **Usage tracked in a materialized `accumulator`** (per policy / service type / period), updated in the
-   same transaction as adjudication, with line-item adjudications as the audit ledger for reconciliation.
+6. **Usage tracked in a materialized `accumulator`** (per policy / service type / period), updated when
+   a line item is adjudicated, with line-item adjudications as the audit ledger for reconciliation.
 7. **Status via `text` + `CHECK`**, not Postgres ENUM — CHECK constraints evolve cleanly in migrations
    (ENUMs can't drop values and can't `ADD VALUE` in a transaction). Lookups (`service_type`,
    `reason_code`) are tables for referential integrity.
@@ -35,6 +35,14 @@
 10. **Migration baseline reconciled.** The project arrived with a ghost migration record
     (`20260603163415_create_claims_table`) and no matching table; it was removed so the ledger is
     truthful and our first migration is the genuine baseline.
+11. **Data access via the Supabase client (PostgREST), service-role key only.** The app uses just
+    `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (no `DATABASE_URL` / direct Postgres). Chosen for
+    simplicity and because the Supabase project's direct Postgres host is IPv6-only (not reachable on a
+    typical IPv4 network), whereas the REST endpoint is IPv4-friendly.
+    **Tradeoff:** PostgREST has no multi-call transaction. The adjudication write path (decision row +
+    accumulator update) is therefore not atomic across separate calls. If atomicity becomes required,
+    move that write into a Postgres function and call it via `client.rpc(...)` (single transaction).
+    Recorded as a known limitation rather than silently accepted.
 
 ## Migrations
 
