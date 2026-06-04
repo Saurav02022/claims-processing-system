@@ -36,6 +36,19 @@
     (`20260603163415_create_claims_table`) and no matching table; it was removed so the ledger is
     truthful and our first migration is the genuine baseline.
 
+## Migrations
+
+- Three migrations under `backend/supabase/migrations/`, filenames matching the applied ledger
+  versions for clean reproducibility:
+  `baseline_schema` (DDL), `seed_reference_data` (catalog + reason codes), `schema_hardening`.
+- **Applied migrations are immutable.** Advisor-driven fixes went into a new `schema_hardening`
+  migration rather than editing the baseline.
+- **Advisor pass after DDL:** dropped a leftover `ensure_rls` event trigger / `rls_auto_enable()`
+  SECURITY DEFINER function (redundant with our explicit RLS, and not in our migration history);
+  pinned `search_path` on `set_updated_at()`; added covering indexes for unindexed FKs. The only
+  remaining advisories are `rls_enabled_no_policy` (INFO) — intended (see below). `unused_index`
+  notices are ignored: they fire only because the DB has no query traffic yet.
+
 ## Sensitive data (PHI)
 
 - PHI is isolated to named columns (member name/DOB, diagnosis code, provider details, dispute reason)
