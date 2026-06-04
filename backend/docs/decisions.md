@@ -68,3 +68,17 @@ providers are not managed as records. Column-level encryption is a documented no
 - Coverage dimensions limited to: covered?, annual money limit, annual visit limit, copay, coinsurance,
   manual-review threshold, plan-level annual deductible. Waiting periods / out-of-pocket maximums deferred.
 - `paid` is modeled as an explicit transition (not auto-set on approval) until the lifecycle is wired.
+
+### Adjudication assumptions surfaced by the test suite
+
+These are encoded as expectations in `tests/test_adjudication_edge_cases.py`; the engine
+implementation must honour them (or the tests must be updated with rationale):
+
+- **Money rounds HALF_UP to 2 decimals** (standard for currency/billing).
+- **The annual money limit caps the insurer-payable amount**, applied *after* cost sharing.
+- **Rule precedence** follows the documented §6 step order: policy validity → coverage →
+  cost sharing → limits → review threshold (e.g. a terminated policy denies `POLICY_INACTIVE`
+  even with no rule; an exhausted limit denies before the review-threshold check).
+- **`payable_amount` is floored at 0** — cost sharing exceeding the covered amount never goes negative.
+- **`quantity` semantics are undecided** (does it multiply billed amount / count as multiple visits?).
+  Intentionally left untested pending a product decision rather than asserting an invented rule.
