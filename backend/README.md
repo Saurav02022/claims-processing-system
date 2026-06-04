@@ -1,115 +1,30 @@
-# FastAPI Backend
+# Backend — Claims Processing System
 
-This is a basic backend project built with Python and FastAPI.
+This is the backend service (Python + FastAPI over Supabase/Postgres).
 
-## Requirements
+**Full setup, run, test, and API documentation is in the root
+[`../README.md`](../README.md).** Read that first.
 
-Make sure you have Python installed.
-
-Recommended Python version:
-
-```bash
-python3 --version
-```
-
-## How to Clone the Project
-
-Clone the repository:
+## Quick start
 
 ```bash
-git clone <https://github.com/Saurav02022/claims-processing-system.git>
+# from this backend/ directory
+python3 -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements-dev.txt
+cp .env.example .env                                # fill in SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
+
+uvicorn app.main:app --reload                       # http://127.0.0.1:8000/docs
+pytest -q                                           # run the test suite
 ```
 
-Go inside the project folder:
+Before submitting claims, apply the SQL migrations in `supabase/migrations/`
+to your Supabase project and seed demo data with `python -m scripts.seed_demo`
+(details in the root README).
 
-```bash
-cd backend
-```
+## Layout
 
-> Replace `<https://github.com/Saurav02022/claims-processing-system.git>` with the actual GitHub repository URL.
-
-## Create Virtual Environment
-
-Create a virtual environment:
-
-```bash
-python3 -m venv venv
-```
-
-Activate the virtual environment:
-
-### Mac / Linux
-
-```bash
-source venv/bin/activate
-```
-
-### Windows
-
-```bash
-venv\Scripts\activate
-```
-
-## Install Dependencies
-
-Install all required packages:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Run the Project
-
-Start the FastAPI development server:
-
-```bash
-fastapi dev app/main.py
-```
-
-Or run using Uvicorn:
-
-```bash
-uvicorn app.main:app --reload
-```
-
-## Open in Browser
-
-After running the server, open:
-
-```text
-http://127.0.0.1:8000
-```
-
-API documentation will be available at:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-## Basic Project Structure
-
-```text
-backend/
-  app/
-    __init__.py
-    main.py
-  requirements.txt
-  README.md
-  .gitignore
-```
-
-## Health Check
-
-You can check if the backend is running by opening:
-
-```text
-http://127.0.0.1:8000/health
-```
-
-Expected response:
-
-```json
-{
-  "status": "ok"
-}
-```
+- `app/` — FastAPI app, services, repository, and the pure `domain/` engine
+- `supabase/migrations/` — database schema (source of truth)
+- `scripts/seed_demo.py` — demo plan/policy/coverage rules
+- `tests/` — engine, API, and DB-constraint tests
+- `docs/` — domain model, decisions, self-review, and the assignment brief
