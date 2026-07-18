@@ -12,7 +12,7 @@ FastAPI · Python · Supabase / PostgreSQL · Pydantic · pytest · *(Forward De
 2. [Architecture](#architecture)
 3. [Where things live](#where-things-live)
 4. [How a line item is adjudicated](#how-a-line-item-is-adjudicated)
-5. [Invariants the system guarantees](#invariants-the-system-guarantees)
+5. [Invariants the system holds](#invariants-the-system-holds)
 6. [Data model & atomic submission](#data-model--atomic-submission)
 7. [Design decisions (and the alternatives I turned down)](#design-decisions-and-the-alternatives-i-turned-down)
 8. [API](#api)
@@ -86,7 +86,7 @@ If you only read two files, read `app/domain/adjudication.py` (all the business 
 
 A clean approval with no reductions is tagged `COVERED_IN_FULL`; every decision carries at least one reason. The **claim status** is a roll-up: any line in review → `under_review`; all approved → `approved`; all denied → `denied`; otherwise `partially_approved`.
 
-## Invariants the system guarantees
+## Invariants the system holds
 
 These hold no matter what input arrives — some enforced in the engine, some by the database (so they survive a bug in the app):
 
