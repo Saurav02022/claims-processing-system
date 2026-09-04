@@ -1,5 +1,7 @@
 # Claims Adjudication Engine
 
+[![tests](https://github.com/Saurav02022/claims-processing-system/actions/workflows/tests.yml/badge.svg)](https://github.com/Saurav02022/claims-processing-system/actions/workflows/tests.yml)
+
 A backend that decides what a health-insurance claim actually pays. A claim is a set of **line items**; each line is adjudicated independently against the policy's coverage rules — covered or not, how much is payable, and **why** — and the line decisions roll up into a claim status. Members can dispute a decision and reviewers can complete a manual review; both re-adjudicate and keep a full audit trail.
 
 The hard part isn't the arithmetic. It's that money has no partial credit — a rounding drift, a double-applied deductible, or a half-written claim all corrupt the record — and the client can't hold a transaction across calls. So the design is really about **where correctness is enforced**: a pure rules engine for the math, and the database for atomicity and every constraint that must never be violated.
